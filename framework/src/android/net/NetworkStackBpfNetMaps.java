@@ -81,9 +81,17 @@ public class NetworkStackBpfNetMaps {
                             + " is not supported below Android T");
         }
         mDeps = deps;
-        mConfigurationMap = mDeps.getConfigurationMap();
-        mUidOwnerMap = mDeps.getUidOwnerMap();
-        mDataSaverEnabledMap = mDeps.getDataSaverEnabledMap();
+        // No BPF map support on this kernel: don't crash the network stack if
+        // maps can't be opened; fall back to null and safe defaults.
+        IBpfMap<S32, U32> cfg;
+        IBpfMap<S32, UidOwnerValue> uid;
+        IBpfMap<S32, U8> dse;
+        try { cfg = mDeps.getConfigurationMap(); } catch (IllegalStateException e) { cfg = null; }
+        try { uid = mDeps.getUidOwnerMap(); } catch (IllegalStateException e) { uid = null; }
+        try { dse = mDeps.getDataSaverEnabledMap(); } catch (IllegalStateException e) { dse = null; }
+        mConfigurationMap = cfg;
+        mUidOwnerMap = uid;
+        mDataSaverEnabledMap = dse;
     }
 
     /**
@@ -132,6 +140,8 @@ public class NetworkStackBpfNetMaps {
      *                                  cause of the failure.
      */
     public boolean isChainEnabled(final int chain) {
+        // no BPF maps: chain not enabled
+        if (mConfigurationMap == null) return false;
         return BpfNetMapsUtils.isChainEnabled(mConfigurationMap, chain);
     }
 
@@ -147,6 +157,8 @@ public class NetworkStackBpfNetMaps {
      *                                  cause of the failure.
      */
     public int getUidRule(final int chain, final int uid) {
+        // no BPF maps: allow all
+        if (mUidOwnerMap == null) return android.net.ConnectivityManager.FIREWALL_RULE_ALLOW;
         return BpfNetMapsUtils.getUidRule(mUidOwnerMap, chain, uid);
     }
 
@@ -164,6 +176,11 @@ public class NetworkStackBpfNetMaps {
      * @hide
      */
     public boolean isUidNetworkingBlocked(final int uid, boolean isNetworkMetered) {
+        // no BPF maps: no firewall, so not blocked
+        if (mConfigurationMap == null || mUidOwnerMap == null
+                || mDataSaverEnabledMap == null) {
+            return false;
+        }
         return BpfNetMapsUtils.isUidNetworkingBlocked(uid, isNetworkMetered,
                 mConfigurationMap, mUidOwnerMap, mDataSaverEnabledMap);
     }
@@ -182,6 +199,8 @@ public class NetworkStackBpfNetMaps {
      *                                  cause of the failure.
      */
     public boolean getDataSaverEnabled() {
+        // no BPF maps: data saver off
+        if (mDataSaverEnabledMap == null) return false;
         return BpfNetMapsUtils.getDataSaverEnabled(mDataSaverEnabledMap);
     }
 }

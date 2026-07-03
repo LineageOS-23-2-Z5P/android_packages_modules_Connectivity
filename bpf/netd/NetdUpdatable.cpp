@@ -31,8 +31,11 @@ int libnetd_updatable_init(const char* cg2_path) {
 
     android::base::Result<void> ret = sBpfHandler.init(cg2_path);
     if (!ret.ok()) {
-        LOG(ERROR) << __func__ << ": Failed: " << ret.error().message();
-        abort();
+        // No eBPF on this kernel: BpfHandler.init fails with ENOSYS. Aborting
+        // would kill netd and trigger an apex rollback that blocks boot, so
+        // degrade gracefully and run without BPF traffic accounting/firewall.
+        LOG(WARNING) << __func__ << ": Failed: " << ret.error().message()
+                     << " — continuing without BPF (legacy kernel)";
     }
     return 0;
 }

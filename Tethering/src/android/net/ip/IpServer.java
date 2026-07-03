@@ -163,6 +163,19 @@ public class IpServer extends SyncStateMachine {
     private static final SparseArray<String> sMagicDecoderRing =
             MessageUtils.findMessageNames(sMessageClasses);
 
+    // netd's phone-side dnsmasq DNS forwarder dies on this kernel, so advertise
+    // a public DNS server to tether clients; their queries are NAT'd out the
+    // upstream like any other client traffic and resolve without the proxy.
+    private static final Inet4Address PUBLIC_DNS_SERVER;
+    static {
+        try {
+            PUBLIC_DNS_SERVER = (Inet4Address) java.net.InetAddress.getByAddress(
+                    new byte[] {(byte) 8, (byte) 8, (byte) 8, (byte) 8});
+        } catch (UnknownHostException e) {
+            throw new AssertionError("4-byte literal is always a valid IPv4 addr", e);
+        }
+    }
+
     /** IpServer callback. */
     public static class Callback {
         /**
@@ -700,7 +713,7 @@ public class IpServer extends SyncStateMachine {
                 (Inet4Address) clientLinkAddr.getAddress();
 
         final DhcpServingParamsParcel params = makeServingParams(addr /* defaultRouter */,
-                addr /* dnsServer */, serverLinkAddr, clientAddr);
+                PUBLIC_DNS_SERVER /* dnsServer */, serverLinkAddr, clientAddr);
         mDhcpServerStartIndex++;
         mDeps.makeDhcpServer(
                 mIfaceName, params, new DhcpServerCallbacksImpl(mDhcpServerStartIndex));
@@ -1421,7 +1434,8 @@ public class IpServer extends SyncStateMachine {
             final Inet4Address clientAddr = mStaticIpv4ClientAddr == null ? null :
                     (Inet4Address) mStaticIpv4ClientAddr.getAddress();
             final DhcpServingParamsParcel params = makeServingParams(srvAddr /* defaultRouter */,
-                    srvAddr /* dnsServer */, mIpv4Address /* serverLinkAddress */, clientAddr);
+                    PUBLIC_DNS_SERVER /* dnsServer */,
+                    mIpv4Address /* serverLinkAddress */, clientAddr);
             try {
                 mDhcpServer.updateParams(params, new OnHandlerStatusCallback() {
                         @Override

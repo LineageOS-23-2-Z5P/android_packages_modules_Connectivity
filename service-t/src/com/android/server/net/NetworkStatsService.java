@@ -199,6 +199,7 @@ import com.android.net.module.util.TerribleErrorLog;
 import com.android.net.module.util.bpf.CookieTagMapValue;
 import com.android.net.module.util.netlink.InetDiagMessage;
 import com.android.net.module.util.netlink.StructInetDiagSockId;
+import com.android.server.BpfNetMaps;
 import com.android.server.ConnectivityStatsLog;
 import com.android.server.connectivity.ConnectivityResources;
 import com.android.tethering.flags.Flags;
@@ -920,7 +921,10 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
             try {
                 return new BpfMap<>(IFACE_STATS_MAP_PATH, S32.class, StatsMapValue.class);
             } catch (ErrnoException e) {
-                throw new IllegalStateException("Failed to open interface stats map", e);
+                // Legacy kernel without eBPF: bpf_obj_get returns ENOSYS. Return null
+                // (like the other getXxxStatsMap helpers) so the service starts degraded.
+                Log.wtf(TAG, "Cannot open interface stats map: " + e);
+                return null;
             }
         }
 
@@ -1024,6 +1028,10 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
          */
         @Nullable
         public NetworkStats.Entry nativeGetTotalStat() {
+            // No eBPF: see nativeGetUidStat below.
+            if (BpfNetMaps.isBpfDisabled()) {
+                return null;
+            }
             return NetworkStatsService.nativeGetTotalStat();
         }
 
@@ -1036,6 +1044,10 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
          */
         @Nullable
         public NetworkStats.Entry nativeGetIfaceStat(String iface) {
+            // No eBPF: see nativeGetUidStat below.
+            if (BpfNetMaps.isBpfDisabled()) {
+                return null;
+            }
             return NetworkStatsService.nativeGetIfaceStat(iface);
         }
 
@@ -1048,6 +1060,11 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
          */
         @Nullable
         public NetworkStats.Entry nativeGetUidStat(int uid) {
+            // Without eBPF the JNI helper's BpfMapRO<> ctor aborts (SIGABRT, uncatchable)
+            // on missing /sys/fs/bpf maps; short-circuit with the null "error" return.
+            if (BpfNetMaps.isBpfDisabled()) {
+                return null;
+            }
             return NetworkStatsService.nativeGetUidStat(uid);
         }
     }
@@ -2050,7 +2067,9 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
 
     private void setKernelCounterSet(int uid, int set) {
         if (mUidCounterSetMap == null) {
-            Log.wtf(TAG, "Fail to set UidCounterSet: Null bpf map");
+            // No BPF: drive the foreground/background counter set via the legacy
+            // qtaguid ctrl ("s <set> <uid>") instead of the (null) uid_counterset map.
+            writeLegacyQtaguidCounterSet(uid, set);
             return;
         }
 
@@ -2072,6 +2091,20 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
     }
 
     @VisibleForTesting
+    /**
+     * Sets a uid's qtaguid counter set via /proc/net/xt_qtaguid/ctrl,
+     * the legacy equivalent of the bpf uid_counterset map update.
+     */
+    private void writeLegacyQtaguidCounterSet(int uid, int set) {
+        // set: 0 == SET_DEFAULT (background), 1 == SET_FOREGROUND.
+        final byte[] cmd = ("s " + set + " " + uid + "\n").getBytes();
+        try (FileOutputStream fos = new FileOutputStream("/proc/net/xt_qtaguid/ctrl")) {
+            fos.write(cmd);
+        } catch (IOException e) {
+            Log.w(TAG, "qtaguid counter set write failed (uid=" + uid + " set=" + set + "): " + e);
+        }
+    }
+
     public void noteUidForeground(int uid, boolean uidForeground) {
         PermissionUtils.enforceNetworkStackPermission(mContext);
         synchronized (mStatsLock) {
@@ -2819,6 +2852,11 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
 
     private <K extends StatsMapKey, V extends StatsMapValue> void deleteStatsMapTagData(
             IBpfMap<K, V> statsMap, int uid) {
+        // Same null-guard as deleteKernelTagData: with BPF disabled the map is
+        // null and forEach would NPE.
+        if (statsMap == null || BpfNetMaps.isBpfDisabled()) {
+            return;
+        }
         try {
             statsMap.forEach((key, value) -> {
                 if (key.uid == uid) {
@@ -2839,22 +2877,31 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
      * @param uid
      */
     private void deleteKernelTagData(int uid) {
+        /*
+         * With BPF disabled the map fields below are null and this uninstall path
+         * would NPE; none of the maps exist, so skip the whole method.
+         */
+        if (BpfNetMaps.isBpfDisabled()) {
+            return;
+        }
         try {
-            mCookieTagMap.forEach((key, value) -> {
-                // If SkDestroyListener deletes the socket tag while this code is running,
-                // forEach will either restart iteration from the beginning or return null,
-                // depending on when the deletion happens.
-                // If it returns null, continue iteration to delete the data and in fact it would
-                // just iterate from first key because BpfMap#getNextKey would return first key
-                // if the current key is not exist.
-                if (value != null && value.uid == uid) {
-                    try {
-                        mCookieTagMap.deleteEntry(key);
-                    } catch (ErrnoException e) {
-                        logErrorIfNotErrNoent(e, "Failed to delete data(cookie = " + key + ")");
+            if (mCookieTagMap != null) {
+                mCookieTagMap.forEach((key, value) -> {
+                    // If SkDestroyListener deletes the socket tag while this code is running,
+                    // forEach will either restart iteration from the beginning or return null,
+                    // depending on when the deletion happens.
+                    // If it returns null, continue iteration to delete the data and in fact it would
+                    // just iterate from first key because BpfMap#getNextKey would return first key
+                    // if the current key is not exist.
+                    if (value != null && value.uid == uid) {
+                        try {
+                            mCookieTagMap.deleteEntry(key);
+                        } catch (ErrnoException e) {
+                            logErrorIfNotErrNoent(e, "Failed to delete data(cookie = " + key + ")");
+                        }
                     }
-                }
-            });
+                });
+            }
         } catch (ErrnoException e) {
             Log.e(TAG, "Failed to delete tag data from cookie tag map", e);
         }
@@ -2863,13 +2910,17 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
         deleteStatsMapTagData(mStatsMapB, uid);
 
         try {
-            mUidCounterSetMap.deleteEntry(new S32(uid));
+            if (mUidCounterSetMap != null) {
+                mUidCounterSetMap.deleteEntry(new S32(uid));
+            }
         } catch (ErrnoException e) {
             logErrorIfNotErrNoent(e, "Failed to delete tag data from uid counter set map");
         }
 
         try {
-            mAppUidStatsMap.deleteEntry(new S32(uid));
+            if (mAppUidStatsMap != null) {
+                mAppUidStatsMap.deleteEntry(new S32(uid));
+            }
         } catch (ErrnoException e) {
             logErrorIfNotErrNoent(e, "Failed to delete tag data from app uid stats map");
         }
@@ -3156,31 +3207,36 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
                 pw.decreaseIndent();
             }
 
-            pw.println();
-            pw.println("InterfaceMapHelper:");
-            pw.increaseIndent();
-            mInterfaceMapHelper.dump(pw);
-            pw.decreaseIndent();
+            // Without eBPF the maps don't exist, so these dumps would NPE
+            // (BpfDump.dumpMap on a null IBpfMap, aborting the whole `dumpsys netstats`).
+            // Skip the bpf section when bpf is disabled so the uid/xt/dev sections still dump.
+            if (!BpfNetMaps.isBpfDisabled()) {
+                pw.println();
+                pw.println("InterfaceMapHelper:");
+                pw.increaseIndent();
+                mInterfaceMapHelper.dump(pw);
+                pw.decreaseIndent();
 
-            pw.println();
-            pw.println("BPF map status:");
-            pw.increaseIndent();
-            dumpMapStatus(pw);
-            pw.decreaseIndent();
-            pw.println();
+                pw.println();
+                pw.println("BPF map status:");
+                pw.increaseIndent();
+                dumpMapStatus(pw);
+                pw.decreaseIndent();
+                pw.println();
 
-            // Following BPF map content dump contains uid and tag regardless of the flags because
-            // following dumps are moved from TrafficController and bug report already contains this
-            // information.
-            pw.println("BPF map content:");
-            pw.increaseIndent();
-            dumpCookieTagMapLocked(pw);
-            dumpUidCounterSetMapLocked(pw);
-            dumpAppUidStatsMapLocked(pw);
-            dumpStatsMapLocked(mStatsMapA, pw, "mStatsMapA");
-            dumpStatsMapLocked(mStatsMapB, pw, "mStatsMapB");
-            dumpIfaceStatsMapLocked(pw);
-            pw.decreaseIndent();
+                // Following BPF map content dump contains uid and tag regardless of the flags
+                // because following dumps are moved from TrafficController and bug report already
+                // contains this information.
+                pw.println("BPF map content:");
+                pw.increaseIndent();
+                dumpCookieTagMapLocked(pw);
+                dumpUidCounterSetMapLocked(pw);
+                dumpAppUidStatsMapLocked(pw);
+                dumpStatsMapLocked(mStatsMapA, pw, "mStatsMapA");
+                dumpStatsMapLocked(mStatsMapB, pw, "mStatsMapB");
+                dumpIfaceStatsMapLocked(pw);
+                pw.decreaseIndent();
+            }
 
             pw.println();
             pw.println("SkDestroyListener logs:");
@@ -3327,6 +3383,10 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
 
     @GuardedBy("mStatsLock")
     private void dumpIfaceStatsMapLocked(final IndentingPrintWriter pw) {
+        if (mIfaceStatsMap == null) {
+            pw.println("mIfaceStatsMap: null (legacy kernel without eBPF)");
+            return;
+        }
         BpfDump.dumpMap(mIfaceStatsMap, pw, "mIfaceStatsMap",
                 "ifaceIndex ifaceName rxBytes rxPackets txBytes txPackets",
                 (key, value) -> {

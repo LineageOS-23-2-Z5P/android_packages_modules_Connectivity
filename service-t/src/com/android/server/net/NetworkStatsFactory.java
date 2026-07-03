@@ -17,7 +17,9 @@
 package com.android.server.net;
 
 import static android.net.NetworkStats.INTERFACES_ALL;
+import static android.net.NetworkStats.SET_ALL;
 import static android.net.NetworkStats.TAG_ALL;
+import static android.net.NetworkStats.TAG_NONE;
 import static android.net.NetworkStats.UID_ALL;
 import static android.provider.DeviceConfig.NAMESPACE_TETHERING;
 
@@ -40,6 +42,9 @@ import com.android.net.module.util.DeviceConfigUtils;
 import com.android.server.BpfNetMaps;
 import com.android.server.connectivity.InterfaceTracker;
 
+import java.io.BufferedReader;
+import java.io.FileNotFoundException;
+import java.io.FileReader;
 import java.io.IOException;
 import java.net.ProtocolException;
 import java.util.ArrayList;
@@ -103,16 +108,72 @@ public class NetworkStatsFactory {
      */
     @VisibleForTesting
     public static class Dependencies {
+        private static final String QTAGUID_UID_STATS = "/proc/net/xt_qtaguid/stats";
+        private static final String PROC_NET_DEV = "/proc/net/dev";
+
         /**
          * Parse detailed statistics from bpf into given {@link NetworkStats} object. Values
          * are expected to monotonically increase since device boot.
          */
         @NonNull
         public NetworkStats getNetworkStatsDetail() throws IOException {
+            // Without eBPF the native helpers would instantiate BpfMapRO<> objects that
+            // abort system_server when the /sys/fs/bpf maps don't exist, so read the
+            // legacy xt_qtaguid per-uid accounting instead of taking the JNI/bpf path.
+            if (BpfNetMaps.isBpfDisabled()) {
+                // Return the absolute cumulative-since-boot snapshot; readNetworkStatsDetail()
+                // handles it like the dev/xt summary path (NetworkStatsRecorder computes the
+                // per-bucket delta), so no per-poll delta bookkeeping is done here.
+                return readQtaguidStatsDetail();
+            }
             final NetworkStats stats = new NetworkStats(SystemClock.elapsedRealtime(), 0);
             final int ret = nativeReadNetworkStatsDetail(stats);
             if (ret != 0) {
                 throw new IOException("Failed to parse network stats");
+            }
+            return stats;
+        }
+
+        /**
+         * Parse absolute cumulative-since-boot per-UID counters from
+         * {@code /proc/net/xt_qtaguid/stats} into a {@link NetworkStats}.
+         */
+        @NonNull
+        private NetworkStats readQtaguidStatsDetail() throws IOException {
+            final NetworkStats stats = new NetworkStats(SystemClock.elapsedRealtime(), 24);
+            try (BufferedReader reader = new BufferedReader(new FileReader(QTAGUID_UID_STATS))) {
+                String line;
+                boolean headerSkipped = false;
+                while ((line = reader.readLine()) != null) {
+                    if (!headerSkipped) {
+                        headerSkipped = true;  // first line is the column header
+                        continue;
+                    }
+                    final String[] c = line.trim().split("\\s+");
+                    // Need at least through tx_packets (column index 8).
+                    if (c.length < 9) {
+                        continue;
+                    }
+                    try {
+                        final String iface = c[1];
+                        final int tag = kernelToTag(c[2]);   // high 32 bits of acct_tag_hex
+                        final int uid = Integer.parseInt(c[3]);
+                        // cnt_set: 0 == SET_DEFAULT (background), 1 == SET_FOREGROUND.
+                        final int set = Integer.parseInt(c[4]);
+                        final long rxBytes = Long.parseLong(c[5]);
+                        final long rxPackets = Long.parseLong(c[6]);
+                        final long txBytes = Long.parseLong(c[7]);
+                        final long txPackets = Long.parseLong(c[8]);
+                        stats.insertEntry(iface, uid, set, tag, rxBytes, rxPackets, txBytes,
+                                txPackets, 0L);
+                    } catch (NumberFormatException e) {
+                        // Skip a malformed row rather than dropping the whole poll.
+                        Log.w(TAG, "skipping unparseable xt_qtaguid stats row: " + line);
+                    }
+                }
+            } catch (FileNotFoundException e) {
+                // qtaguid not mounted (unexpected on this kernel): report nothing.
+                Log.w(TAG, "xt_qtaguid stats unavailable: " + e);
             }
             return stats;
         }
@@ -122,10 +183,60 @@ public class NetworkStatsFactory {
          */
         @NonNull
         public NetworkStats getNetworkStatsDev() throws IOException {
+            // Without eBPF the iface stats map doesn't exist; read the absolute
+            // per-interface counters from /proc/net/dev instead.
+            if (BpfNetMaps.isBpfDisabled()) {
+                return readProcNetDevSummary();
+            }
             final NetworkStats stats = new NetworkStats(SystemClock.elapsedRealtime(), 6);
             final int ret = nativeReadNetworkStatsDev(stats);
             if (ret != 0) {
                 throw new IOException("Failed to parse bpf iface stats");
+            }
+            return stats;
+        }
+
+        /**
+         * Parse absolute cumulative-since-boot per-interface counters from
+         * {@code /proc/net/dev} into an interface-summary {@link NetworkStats}.
+         */
+        @NonNull
+        private NetworkStats readProcNetDevSummary() throws IOException {
+            final NetworkStats stats = new NetworkStats(SystemClock.elapsedRealtime(), 6);
+            try (BufferedReader reader = new BufferedReader(new FileReader(PROC_NET_DEV))) {
+                String line;
+                int headerLines = 2;  // /proc/net/dev starts with two header rows
+                while ((line = reader.readLine()) != null) {
+                    if (headerLines > 0) {
+                        headerLines--;
+                        continue;
+                    }
+                    final int colon = line.indexOf(':');
+                    if (colon < 0) {
+                        continue;
+                    }
+                    final String iface = line.substring(0, colon).trim();
+                    if (iface.isEmpty() || "lo".equals(iface)) {
+                        continue;
+                    }
+                    final String[] c = line.substring(colon + 1).trim().split("\\s+");
+                    // Receive cols: 0=bytes 1=packets ...; Transmit cols: 8=bytes 9=packets.
+                    if (c.length < 10) {
+                        continue;
+                    }
+                    try {
+                        final long rxBytes = Long.parseLong(c[0]);
+                        final long rxPackets = Long.parseLong(c[1]);
+                        final long txBytes = Long.parseLong(c[8]);
+                        final long txPackets = Long.parseLong(c[9]);
+                        stats.insertEntry(iface, UID_ALL, SET_ALL, TAG_NONE, rxBytes, rxPackets,
+                                txBytes, txPackets, 0L);
+                    } catch (NumberFormatException e) {
+                        Log.w(TAG, "skipping unparseable /proc/net/dev row: " + line);
+                    }
+                }
+            } catch (FileNotFoundException e) {
+                Log.w(TAG, "/proc/net/dev unavailable: " + e);
             }
             return stats;
         }
@@ -252,6 +363,19 @@ public class NetworkStatsFactory {
         synchronized (mPersistentDataLock) {
             // Take a reference. If this gets swapped out, we still have the old reference.
             final UnderlyingNetworkInfo[] vpnArray = mUnderlyingNetworkInfos;
+
+            // Without eBPF, getNetworkStatsDetail() returns an absolute snapshot; skip the
+            // bpf swap-map/diff bookkeeping (it would multiply counts) and return it directly.
+            if (BpfNetMaps.isBpfDisabled()) {
+                final NetworkStats absolute = mDeps.getNetworkStatsDetail();
+                absolute.apply464xlatAdjustments(mStackedIfaces);
+                for (UnderlyingNetworkInfo info : vpnArray) {
+                    absolute.migrateTun(info.getOwnerUid(), info.getInterface(),
+                            info.getUnderlyingInterfaces());
+                    absolute.filterDebugEntries();
+                }
+                return absolute.filteredClone(limitUid, limitIfaces, limitTag);
+            }
 
             requestSwapActiveStatsMapLocked();
             // Stats are always read from the inactive map, so they must be read after the

@@ -54,6 +54,7 @@ import static android.system.OsConstants.ENODEV;
 import static android.system.OsConstants.ENOENT;
 import static android.system.OsConstants.ENOMEM;
 import static android.system.OsConstants.ENOSPC;
+import static android.system.OsConstants.ENOSYS;
 import static android.system.OsConstants.EOPNOTSUPP;
 
 import static com.android.modules.utils.build.SdkLevel.isAtLeastB;
@@ -174,6 +175,18 @@ public class BpfNetMaps {
     private final Dependencies mDeps;
     // Use legacy netd for releases before T.
     private static boolean sInitialized = false;
+
+    // No eBPF on this kernel: ensureInitialized() detects bpf_obj_get ENOSYS and
+    // sets this, after which every public method short-circuits to a safe default.
+    private static boolean sBpfDisabled = false;
+
+    /**
+     * Returns true once the kernel is detected to lack eBPF support. Other classes
+     * (e.g. NetworkStatsFactory) use it to skip native paths that abort with no BPF maps.
+     */
+    public static boolean isBpfDisabled() {
+        return sBpfDisabled;
+    }
 
     // Lock for sConfigurationMap entry for UID_RULES_CONFIGURATION_KEY.
     // This entry is not accessed by others.
@@ -824,7 +837,24 @@ public class BpfNetMaps {
         sBetaMetricsEnabled = deps.isBetaMetricsEnabled();
         if (SdkLevel.isAtLeastT()) {
             sL4sSupported = deps.isL4sProgramLoaded();
-            initBpfMaps(deps);
+            try {
+                initBpfMaps(deps);
+            } catch (IllegalStateException e) {
+                // No eBPF on this kernel: bpf_obj_get returns ENOSYS. Mark BpfNetMaps
+                // as disabled so every public method short-circuits to safe defaults;
+                // the connectivity stack must live without BPF traffic accounting.
+                final Throwable cause = e.getCause();
+                if (cause instanceof ErrnoException
+                        && ((ErrnoException) cause).errno == ENOSYS) {
+                    Log.w(TAG, "Kernel has no eBPF support — BpfNetMaps disabled "
+                            + "(no traffic accounting, firewall, or 464XLAT): "
+                            + e.getMessage());
+                    sBpfDisabled = true;
+                    sInitialized = true;
+                    return;
+                }
+                throw e;
+            }
         }
         sInitialized = true;
     }
@@ -1082,6 +1112,7 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void setChildChain(final int childChain, final boolean enable) {
         throwIfPreT("setChildChain is not available on pre-T devices");
+        if (sBpfDisabled) return;
 
         final long match = getMatchByFirewallChain(childChain);
         try {
@@ -1108,6 +1139,7 @@ public class BpfNetMaps {
     @Deprecated
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public boolean isChainEnabled(final int childChain) {
+        if (sBpfDisabled) return false;
         return BpfNetMapsUtils.isChainEnabled(sConfigurationMap, childChain);
     }
 
@@ -1131,6 +1163,7 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void replaceUidChain(final int chain, final int[] uids) {
         throwIfPreT("replaceUidChain is not available on pre-T devices");
+        if (sBpfDisabled) return;
 
         final long match;
         try {
@@ -1179,6 +1212,7 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void setUidRule(final int childChain, final int uid, final int firewallRule) {
         throwIfPreT("setUidRule is not available on pre-T devices");
+        if (sBpfDisabled) return;
 
         final long match = getMatchByFirewallChain(childChain);
         final boolean isAllowList = isFirewallAllowList(childChain);
@@ -1204,6 +1238,7 @@ public class BpfNetMaps {
      */
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public int getUidRule(final int childChain, final int uid) {
+        if (sBpfDisabled) return FIREWALL_RULE_ALLOW;
         return BpfNetMapsUtils.getUidRule(sUidOwnerMap, childChain, uid);
     }
 
@@ -1243,6 +1278,7 @@ public class BpfNetMaps {
             throw new IllegalArgumentException("getUidsWithAllowRuleOnAllowListChain is called with"
                     + " denylist chain:" + childChain);
         }
+        if (sBpfDisabled) return new ArraySet<>();
         // Corresponding match is enabled for uids that has FIREWALL_RULE_ALLOW on allowlist chain.
         return getUidsMatchEnabled(childChain);
     }
@@ -1265,6 +1301,7 @@ public class BpfNetMaps {
             throw new IllegalArgumentException("getUidsWithDenyRuleOnDenyListChain is called with"
                     + " allowlist chain:" + childChain);
         }
+        if (sBpfDisabled) return new ArraySet<>();
         // Corresponding match is enabled for uids that has FIREWALL_RULE_DENY on denylist chain.
         return getUidsMatchEnabled(childChain);
     }
@@ -1291,6 +1328,7 @@ public class BpfNetMaps {
             mNetd.firewallAddUidInterfaceRules(ifName, uids);
             return;
         }
+        if (sBpfDisabled) return;
 
         // Null ifName is a wildcard to allow apps to receive packets on all interfaces and
         // ifIndex is set to 0.
@@ -1329,6 +1367,7 @@ public class BpfNetMaps {
             mNetd.firewallRemoveUidInterfaceRules(uids);
             return;
         }
+        if (sBpfDisabled) return;
 
         for (final int uid : uids) {
             try {
@@ -1350,6 +1389,7 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void updateUidLockdownRule(final int uid, final boolean add) {
         throwIfPreT("updateUidLockdownRule is not available on pre-T devices");
+        if (sBpfDisabled) return;
 
         if (add) {
             addRule(uid, LOCKDOWN_VPN_MATCH, "updateUidLockdownRule");
@@ -1368,6 +1408,7 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void swapActiveStatsMap() {
         throwIfPreT("swapActiveStatsMap is not available on pre-T devices");
+        if (sBpfDisabled) return;
 
         try {
             synchronized (sCurrentStatsMapConfigLock) {
@@ -1432,6 +1473,7 @@ public class BpfNetMaps {
             logAndSendNetPermToNetd(permissions, uids);
             return;
         }
+        if (sBpfDisabled) return;
 
         // Remove the entry if package is uninstalled or uid has only INTERNET permission.
         if (permissions == TRAFFIC_PERMISSION_UNINSTALLED
@@ -1762,6 +1804,7 @@ public class BpfNetMaps {
             final InetAddress address, final int protocol, final int remotePort,
             final boolean isAllowed) {
         throwIfPre25Q2("addLocalNetAccess is not available on pre-B devices");
+        if (sBpfDisabled) return;
         if (iface == null) {
             Log.e(TAG, "Null iface, skip addLocalNetAccess for " + address);
             return;
@@ -1798,6 +1841,7 @@ public class BpfNetMaps {
     public void removeLocalNetAccess(final int lpmBitlen, @Nullable final String iface,
             final InetAddress address, final int protocol, final int remotePort) {
         throwIfPre25Q2("removeLocalNetAccess is not available on pre-B devices");
+        if (sBpfDisabled) return;
         final int ifIndex;
         if (iface == null) {
             ifIndex = 0;
@@ -1838,6 +1882,7 @@ public class BpfNetMaps {
     public boolean getLocalNetAccess(final int lpmBitlen, @Nullable final String iface,
             final InetAddress address, final int protocol, final int remotePort) {
         throwIfPre25Q2("getLocalNetAccess is not available on pre-B devices");
+        if (sBpfDisabled) return true;
         final int ifIndex;
         if (iface == null) {
             ifIndex = 0;
@@ -1902,6 +1947,7 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.CUR_DEVELOPMENT)
     public void addUidToLocalNetBlockMap(final int uid) {
         throwIfPre25Q2("addUidToLocalNetBlockMap is not available on pre-B devices");
+        if (sBpfDisabled) return;
         try {
             sLocalNetBlockedUidMap.updateEntry(new U32(uid), new Bool(true));
         } catch (ErrnoException e) {
@@ -1916,6 +1962,7 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.CUR_DEVELOPMENT)
     public boolean isUidBlockedFromUsingLocalNetwork(final int uid) {
         throwIfPre25Q2("isUidBlockedFromUsingLocalNetwork is not available on pre-B devices");
+        if (sBpfDisabled) return false;
         try {
             final Bool value = sLocalNetBlockedUidMap.getValue(new U32(uid));
             return value == null ? false : value.val;
@@ -1933,6 +1980,7 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.CUR_DEVELOPMENT)
     public void removeUidFromLocalNetBlockMap(final int uid) {
         throwIfPre25Q2("removeUidFromLocalNetBlockMap is not available on pre-B devices");
+        if (sBpfDisabled) return;
         try {
             sLocalNetBlockedUidMap.deleteEntry(new U32(uid));
         } catch (ErrnoException e) {
@@ -2039,6 +2087,7 @@ public class BpfNetMaps {
      */
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public int getNetPermForUid(final int uid) {
+        if (sBpfDisabled) return TRAFFIC_PERMISSION_INTERNET;
         if (isUidMigrationEnabled()) {
             final int chunkPermissions = getChunkPermForUid(uid);
             return convertToTrafficPermission(chunkPermissions);
@@ -2095,6 +2144,7 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void setDataSaverEnabled(boolean enable) {
         throwIfPreT("setDataSaverEnabled is not available on pre-T devices");
+        if (sBpfDisabled) return;
 
         try {
             final short config = enable ? DATA_SAVER_ENABLED : DATA_SAVER_DISABLED;
@@ -2114,6 +2164,7 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void setIngressDiscardRule(final InetAddress address, final String iface) {
         throwIfPreT("setIngressDiscardRule is not available on pre-T devices");
+        if (sBpfDisabled) return;
         final int ifIndex = mDeps.getIfIndex(iface);
         if (ifIndex == 0) {
             Log.e(TAG, "Failed to get if index, skip setting ingress discard rule for " + address
@@ -2137,6 +2188,7 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void removeIngressDiscardRule(final InetAddress address) {
         throwIfPreT("removeIngressDiscardRule is not available on pre-T devices");
+        if (sBpfDisabled) return;
         try {
             sIngressDiscardMap.deleteEntry(new IngressDiscardKey(address));
         } catch (ErrnoException e) {
@@ -2152,6 +2204,7 @@ public class BpfNetMaps {
      */
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public int getUidNetworkingBlockedReasons(final int uid) {
+        if (sBpfDisabled) return BLOCKED_REASON_NONE;
         return BpfNetMapsUtils.getUidNetworkingBlockedReasons(uid,
                 sConfigurationMap, sUidOwnerMap, sDataSaverEnabledMap);
     }
@@ -2183,6 +2236,7 @@ public class BpfNetMaps {
      */
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public boolean isUidNetworkingBlocked(final int uid, boolean isNetworkMetered) {
+        if (sBpfDisabled) return false;
         return BpfNetMapsUtils.isUidNetworkingBlocked(uid, isNetworkMetered,
                 sConfigurationMap, sUidOwnerMap, sDataSaverEnabledMap);
     }
@@ -2191,6 +2245,7 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void setPullAtomCallback(final Context context) {
         throwIfPreT("setPullAtomCallback is not available on pre-T devices");
+        if (sBpfDisabled) return;
 
         final StatsManager statsManager = context.getSystemService(StatsManager.class);
         statsManager.setPullAtomCallback(NETWORK_BPF_MAP_INFO, null /* metadata */,
@@ -2222,6 +2277,7 @@ public class BpfNetMaps {
             Log.e(TAG, "Unexpected atom tag: " + atomTag);
             return StatsManager.PULL_SKIP;
         }
+        if (sBpfDisabled) return StatsManager.PULL_SKIP;
 
         try {
             data.add(mDeps.buildStatsEvent(getMapSize(sCookieTagMap), getMapSize(sUidOwnerMap),
@@ -2467,6 +2523,10 @@ public class BpfNetMaps {
         }
 
         pw.println("TrafficController");  // required by CTS testDumpBpfNetMaps
+        if (sBpfDisabled) {
+            pw.println("(BpfNetMaps disabled — kernel has no eBPF support)");
+            return;
+        }
 
         pw.println();
         if (verbose) {

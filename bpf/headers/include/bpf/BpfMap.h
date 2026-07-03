@@ -110,7 +110,13 @@ class BpfMapRO {
 
   protected:
     void abortOnMismatch(bool writable) const {
-        if (!mMapFd.ok()) Abort(errno, "mMapFd %d is not valid", mMapFd.get());
+        if (!mMapFd.ok()) {
+            /*
+             * No BPF subsystem on this kernel: aborting would kill system_server,
+             * so return silently and let callers fall back.
+             */
+            return;
+        }
         if (isAtLeastKernelVersion(4, 14)) {
             int flags = bpfGetFdMapFlags(mMapFd);
             if (flags < 0) Abort(errno, "bpfGetFdMapFlags fail: flags=%d", flags);
