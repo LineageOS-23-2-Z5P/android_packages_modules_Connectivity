@@ -2187,10 +2187,10 @@ public class Tethering {
                         "SET DNS forwarders: network=%s dnsServers=%s",
                         network, Arrays.toString(dnsServers)));
             } catch (RemoteException | ServiceSpecificException e) {
-                // TODO: Investigate how this can fail and what exactly
-                // happens if/when such failures occur.
-                mLog.e("setting DNS forwarders failed, " + e);
-                transitionTo(mSetDnsForwardersErrorState);
+                // netd's dnsmasq DNS forwarder dies on this kernel (EREMOTEIO/broken pipe);
+                // treat it as non-fatal instead of tearing down the tether. Clients get a
+                // public DNS server via DHCP (see IpServer) and resolve through NAT.
+                mLog.e("setting DNS forwarders failed (continuing), " + e);
             }
         }
 

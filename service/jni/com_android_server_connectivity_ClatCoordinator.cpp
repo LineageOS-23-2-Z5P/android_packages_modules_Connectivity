@@ -132,7 +132,15 @@ static void verifyClatPerms() {
 
 #undef V2
 
-    if (fatal) abort();
+    if (fatal) {
+        // No eBPF on this kernel: bpf_obj_get() returns ENOSYS for every clatd map.
+        // Aborting would kill system_server at boot, so warn and continue without
+        // 464XLAT.
+        ALOGW("Clat BPF verification failed — continuing without 464XLAT "
+              "(legacy kernel without eBPF support).");
+        fatal = false;
+        return;
+    }
 }
 
 #undef V

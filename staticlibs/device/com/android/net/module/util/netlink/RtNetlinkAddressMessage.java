@@ -132,12 +132,16 @@ public class RtNetlinkAddressMessage extends NetlinkMessage {
         addrMsg.mFlags = addrMsg.mIfaddrmsg.flags;
         // IFA_FLAGS. All the flags are in the IF_FLAGS attribute. This should always be present,
         // and will overwrite the flags set above.
+        // Older kernels (pre-3.14) don't emit IFA_FLAGS; fall back to the 8-bit
+        // ifa_flags in the header, else the message is unparsable and the address never confirms.
         byteBuffer.position(baseOffset);
         nlAttr = StructNlAttr.findNextAttrOfType(IFA_FLAGS, byteBuffer);
-        if (nlAttr == null) return null;
-        final Integer value = nlAttr.getValueAsInteger();
-        if (value == null) return null;
-        addrMsg.mFlags = value;
+        if (nlAttr != null) {
+            final Integer value = nlAttr.getValueAsInteger();
+            if (value == null) return null;
+            addrMsg.mFlags = value;
+        }
+        // else: keep addrMsg.mFlags = addrMsg.mIfaddrmsg.flags
 
         return addrMsg;
     }

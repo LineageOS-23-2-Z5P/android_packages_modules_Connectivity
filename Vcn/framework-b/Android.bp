@@ -98,7 +98,7 @@ framework_connectivity_b_defaults_soong_config {
             apex_available: ["com.android.tethering"],
 
             conditions_default: {
-                min_sdk_version: "35",
+                min_sdk_version: "36",
                 static_libs: ["android.net.vcn.flags-aconfig-java-export"],
                 apex_available: ["//apex_available:platform"],
             },
