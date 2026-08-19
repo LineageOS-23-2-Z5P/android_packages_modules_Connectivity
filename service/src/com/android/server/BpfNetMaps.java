@@ -1550,6 +1550,7 @@ public class BpfNetMaps {
      * @throws RemoteException when netd has crashed.
      */
     public void setPermListForUids(final SparseIntArray permissionsUids) throws RemoteException {
+        if (sBpfDisabled) return;
         throwIfUidMigrationIsDisabled(
             "setPermListForUids is not available when flag permission_map_uid_migration" +
             " is disabled");
@@ -1586,6 +1587,7 @@ public class BpfNetMaps {
      */
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void setChunkPermListForUids(final SparseIntArray permissionsUids) {
+        if (sBpfDisabled) return;
         throwIfUidMigrationIsDisabled(
             "setChunkPermListForUids is not available when flag permission_map_uid_migration" +
             " is disabled");
@@ -1722,6 +1724,7 @@ public class BpfNetMaps {
      */
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void removePermissionsForAppId(int appId) {
+        if (sBpfDisabled) return;
         throwIfUidMigrationIsDisabled(
             "removePermissionsForAppId is not available when flag permission_map_uid_migration" +
             " is disabled");
@@ -1745,6 +1748,7 @@ public class BpfNetMaps {
      */
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void removePermissionsForUserId(int userId) {
+        if (sBpfDisabled) return;
         throwIfUidMigrationIsDisabled(
             "removePermissionsForUserId is not available when flag permission_map_uid_migration" +
             " is disabled");
@@ -1915,6 +1919,7 @@ public class BpfNetMaps {
      * @param enabled The new status for L4S. Must be true or false.
      */
     public void setL4sEnabled(boolean enabled) {
+        if (sBpfDisabled) return;
         throwIfL4sNotSupported();
 
         try {
@@ -1930,6 +1935,7 @@ public class BpfNetMaps {
      * @return The current L4S enabled status.
      */
     public boolean isL4sEnabled() {
+        if (sBpfDisabled) return false;
         throwIfL4sNotSupported();
 
         try {
@@ -1993,6 +1999,7 @@ public class BpfNetMaps {
      */
     @RequiresApi(Build.VERSION_CODES.BAKLAVA)
     public void addLocalNetUidAccess(final int uid, @NonNull final String iface) {
+        if (sBpfDisabled) return;
         throwIfPre25Q2("addLocalNetUidAccess is not available on pre-B devices");
         int ifIndex = mInterfaceTracker.getInterfaceIndex(iface);
         if (ifIndex == 0) {
@@ -2014,6 +2021,7 @@ public class BpfNetMaps {
      */
     @RequiresApi(Build.VERSION_CODES.BAKLAVA)
     public void removeLocalNetUidAccess(final int uid, @NonNull final String iface) {
+        if (sBpfDisabled) return;
         throwIfPre25Q2("removeLocalNetUidAccess is not available on pre-B devices");
         final int ifIndex = mInterfaceTracker.getInterfaceIndex(iface);
         if (ifIndex == 0) {
@@ -2041,6 +2049,7 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.BAKLAVA)
     public void addLocalNetUidHostAccess(final int uid, final int ifIndex,
             @NonNull final InetAddress address) {
+        if (sBpfDisabled) return;
         throwIfPre25Q2("addLocalNetUidHostAccess is not available on pre-B devices");
         final LocalNetUidHostAllowlistKey key = new LocalNetUidHostAllowlistKey(
                 uid, ifIndex, address);
@@ -2056,6 +2065,7 @@ public class BpfNetMaps {
      */
     @RequiresApi(Build.VERSION_CODES.BAKLAVA)
     public void removeLocalNetHostAllowlistForInterface(final int ifIndex) {
+        if (sBpfDisabled) return;
         throwIfPre25Q2("removeLocalNetHostAllowlistForInterface is not available on pre-B devices");
         synchronized (sLocalNetAccessLock) {
             incrementLnpGenerationId(true);
@@ -2114,6 +2124,7 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     @VisibleForTesting
     public int getChunkPermForUid(final int uid) {
+        if (sBpfDisabled) return PERMISSION_BIT_NONE;
         throwIfUidMigrationIsDisabled(
             "getChunkPermForUid is not available when flag" +
             " permission_map_uid_migration is disabled");
