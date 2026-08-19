@@ -2655,7 +2655,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
                 ? mDeps.makeMultiProxyTracker(mContext, mHandler)
                 : mDeps.makeProxyTracker(mContext, mHandler);
 
-        if (mDeps.isAtLeastB()) {
+        if (mDeps.isAtLeastB() && !BpfNetMaps.isBpfDisabled()) {
             mLocalNetEventListener = mDeps.getLocalNetEventListener(
                     mContext,
                     mHandler.getLooper(),
@@ -5082,7 +5082,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
             mSatisfiedByLocalNetworkMetrics.start();
         }
 
-        if (mBpfNetMaps.isLoopbackAccessMetricsEnabled()) {
+        if (mBpfNetMaps.isLoopbackAccessMetricsEnabled() && !BpfNetMaps.isBpfDisabled()) {
             BpfEventPoller.nativeInitLoopbackEventConsumer();
         }
 
